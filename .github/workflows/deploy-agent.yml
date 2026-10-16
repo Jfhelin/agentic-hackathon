@@ -1,0 +1,92 @@
+name: Deploy verified agent to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      verification_run_id:
+        description: Successful Validate reviewed agent run ID for the current commit
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-verified-agent
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: 04-foundry-agent-delivery
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERIFICATION_RUN_ID: ${{ inputs.verification_run_id }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.PROD_AZURE_SUBSCRIPTION_ID }}
+      FOUNDRY_PROJECT_ENDPOINT: ${{ vars.PROD_FOUNDRY_PROJECT_ENDPOINT }}
+      FOUNDRY_ACCOUNT_ID: ${{ vars.PROD_FOUNDRY_ACCOUNT_ID }}
+      FOUNDRY_AGENT_NAME: ${{ vars.PROD_FOUNDRY_AGENT_NAME }}
+      FOUNDRY_MODEL_DEPLOYMENT: ${{ vars.PROD_FOUNDRY_MODEL_DEPLOYMENT }}
+      FOUNDRY_MODEL_NAME: ${{ vars.PROD_FOUNDRY_MODEL_NAME }}
+      FOUNDRY_MODEL_VERSION: ${{ vars.PROD_FOUNDRY_MODEL_VERSION }}
+      FOUNDRY_DEPLOYMENT_TYPE: ${{ vars.PROD_FOUNDRY_DEPLOYMENT_TYPE }}
+      FOUNDRY_VERSION_UPGRADE_OPTION: ${{ vars.PROD_FOUNDRY_VERSION_UPGRADE_OPTION }}
+      FOUNDRY_REGION: ${{ vars.PROD_FOUNDRY_REGION }}
+      EXPECTED_OIDC_SUBJECT: ${{ vars.PROD_OIDC_SUBJECT }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify run provenance before production access
+        id: provenance
+        run: python -m scripts.verification_run
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.verification_run_id }}
+          name: ${{ steps.provenance.outputs.artifact_name }}
+          path: 04-foundry-agent-delivery/artifacts
+      - name: Recheck tests, hashes, completeness, and evaluator integrity
+        run: |
+          python -m unittest discover -s tests -v
+          python -m scripts.agent_pipeline validate
+          python -m scripts.agent_pipeline evidence
+      - name: Recheck default-branch freshness before production access
+        run: python -m scripts.verification_run
+      - name: Verify the actual GitHub OIDC subject
+        run: python -m scripts.verify_oidc
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.PROD_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.PROD_AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.PROD_AZURE_SUBSCRIPTION_ID }}
+      - name: Create the explicit production version and smoke-test it
+        run: python -m scripts.agent_pipeline deploy
+      - name: Preserve production version mapping even on smoke failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: 04-foundry-agent-delivery/artifacts/release.json
+          if-no-files-found: warn
+      - name: Production version summary
+        if: always()
+        run: |
+          if [ -f artifacts/release.json ]; then
+            printf '### Production version mapping\n```json\n' >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/release.json >> "$GITHUB_STEP_SUMMARY"
+            printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+          fi

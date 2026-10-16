@@ -1,0 +1,95 @@
+name: Capture development agent
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capture-development-agent
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+      id-token: write
+    defaults:
+      run:
+        working-directory: 04-foundry-agent-delivery
+    env:
+      GH_TOKEN: ${{ github.token }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.DEV_AZURE_SUBSCRIPTION_ID }}
+      FOUNDRY_PROJECT_ENDPOINT: ${{ vars.DEV_FOUNDRY_PROJECT_ENDPOINT }}
+      FOUNDRY_ACCOUNT_ID: ${{ vars.DEV_FOUNDRY_ACCOUNT_ID }}
+      FOUNDRY_AGENT_NAME: ${{ vars.DEV_FOUNDRY_AGENT_NAME }}
+      FOUNDRY_MODEL_DEPLOYMENT: ${{ vars.DEV_FOUNDRY_MODEL_DEPLOYMENT }}
+      FOUNDRY_MODEL_NAME: ${{ vars.DEV_FOUNDRY_MODEL_NAME }}
+      FOUNDRY_MODEL_VERSION: ${{ vars.DEV_FOUNDRY_MODEL_VERSION }}
+      FOUNDRY_DEPLOYMENT_TYPE: ${{ vars.DEV_FOUNDRY_DEPLOYMENT_TYPE }}
+      FOUNDRY_VERSION_UPGRADE_OPTION: ${{ vars.DEV_FOUNDRY_VERSION_UPGRADE_OPTION }}
+      FOUNDRY_REGION: ${{ vars.DEV_FOUNDRY_REGION }}
+      EXPECTED_OIDC_SUBJECT: ${{ vars.DEV_OIDC_SUBJECT }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run offline validation before Azure access
+        run: |
+          python -m unittest discover -s tests -v
+          python -m scripts.agent_pipeline validate
+      - name: Verify the actual GitHub OIDC subject
+        run: python -m scripts.verify_oidc
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.DEV_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.DEV_AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.DEV_AZURE_SUBSCRIPTION_ID }}
+      - name: Capture the latest saved dev version
+        run: |
+          python -m scripts.agent_pipeline capture
+          python -m scripts.agent_pipeline validate
+          cat artifacts/capture.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Create a PR only when the canonical definition changed
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if git diff --quiet -- agent/config.json; then
+            echo "No configuration changes; no PR created."
+            exit 0
+          fi
+          python -m unittest discover -s tests -v
+          python -m scripts.agent_pipeline validate
+          branch="capture-agent-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git switch -c "$branch"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add agent/config.json
+          git commit -m "Capture development agent configuration"
+          git push origin "$branch"
+          commit_sha=$(git rev-parse HEAD)
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${commit_sha}" \
+            -f state=success \
+            -f context="capture/offline-validation" \
+            -f description="Portable definition and offline checks passed"
+          gh pr create --base "$DEFAULT_BRANCH" --head "$branch" \
+            --title "Capture development agent configuration" \
+            --body-file artifacts/capture.md
+          echo "Opened a PR for captured commit $commit_sha."
+      - name: Preserve capture report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capture-${{ github.run_id }}-${{ github.run_attempt }}
+          path: 04-foundry-agent-delivery/artifacts/capture.md
+          if-no-files-found: warn

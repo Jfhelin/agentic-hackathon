@@ -2,5 +2,8 @@
 __pycache__/
 *.py[cod]
 .env
+04-foundry-agent-delivery/participant.json
+04-foundry-agent-delivery/artifacts/
+04-foundry-agent-delivery/.venv/
 .DS_Store
 Thumbs.db

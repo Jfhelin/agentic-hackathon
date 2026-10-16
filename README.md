@@ -5,6 +5,10 @@
 
 A hands-on hackathon for building AI agents with the **Microsoft Agent Framework**, **Azure AI Foundry**, and **GitHub Copilot**. Work through progressive labs — from a first "hello world" agent all the way to hosted deployments and MCP-powered tool integration.
 
+This repository is configured as a GitHub template. Workshop participants
+should select **Use this template** to create their own repository before
+connecting their Foundry environment.
+
 ## Learning path
 
 | Lab | Focus | What you'll build |
@@ -12,9 +16,12 @@ A hands-on hackathon for building AI agents with the **Microsoft Agent Framework
 | [01 — Agent Framework](01-agent-framework/) | Core SDK concepts | Agents, tools, multi-turn sessions, memory, workflows, remote MCP |
 | [02 — Foundry Agents](02-microsoft-foundry-agents/) | Azure AI Foundry | Responses API, chat with agents, create prompt agents |
 | [03 — Hosted Agents](03-microsoft-foundry-hosted-agents/) | Deployment scenarios | Echo agent, web search, RAG, workflows, human-in-the-loop |
+| [04 — Foundry Agent Delivery](04-foundry-agent-delivery/) | Agent lifecycle | Capture a saved dev agent, validate a reviewed version, and deploy the verified version |
 | [05 — GitHub Copilot](05-github-copilot/) | Copilot + MCP | Build a ticketing app with inline suggestions, agents, MCP server, and Agent Framework integration |
 
 Each folder has its own README with detailed instructions and sample descriptions.
+The Foundry delivery lab includes a repository-level **Foundry Workshop Guide**
+custom agent under `.github/agents/` for participants using the GitHub Copilot app.
 
 ## Prerequisites
 
@@ -98,6 +105,7 @@ agentic-hackathon/
 ├── 01-agent-framework/          # Progressive Agent Framework samples (6 scripts)
 ├── 02-microsoft-foundry-agents/ # Azure AI Foundry quickstarts (3 scripts)
 ├── 03-microsoft-foundry-hosted-agents/  # Hosted agent deployment scenarios
+├── 04-foundry-agent-delivery/   # Foundry agent Capture / Validate / Deploy lab
 ├── 05-github-copilot/           # Copilot tutorial with MCP integration
 ├── example.env                  # Environment variable template
 ├── requirements.txt             # Python dependencies (all labs)

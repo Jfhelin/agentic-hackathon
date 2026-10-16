@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "definition": {
+    "kind": "prompt",
+    "instructions": "You are a helpful assistant. Follow the user's instructions and respond clearly.",
+    "tools": []
+  }
+}

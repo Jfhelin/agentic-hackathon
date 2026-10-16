@@ -1,0 +1,77 @@
+name: Validate reviewed agent
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-reviewed-agent
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: 04-foundry-agent-delivery
+    env:
+      AZURE_SUBSCRIPTION_ID: ${{ vars.DEV_AZURE_SUBSCRIPTION_ID }}
+      FOUNDRY_PROJECT_ENDPOINT: ${{ vars.DEV_FOUNDRY_PROJECT_ENDPOINT }}
+      FOUNDRY_ACCOUNT_ID: ${{ vars.DEV_FOUNDRY_ACCOUNT_ID }}
+      FOUNDRY_AGENT_NAME: ${{ vars.DEV_FOUNDRY_AGENT_NAME }}
+      FOUNDRY_MODEL_DEPLOYMENT: ${{ vars.DEV_FOUNDRY_MODEL_DEPLOYMENT }}
+      FOUNDRY_MODEL_NAME: ${{ vars.DEV_FOUNDRY_MODEL_NAME }}
+      FOUNDRY_MODEL_VERSION: ${{ vars.DEV_FOUNDRY_MODEL_VERSION }}
+      FOUNDRY_DEPLOYMENT_TYPE: ${{ vars.DEV_FOUNDRY_DEPLOYMENT_TYPE }}
+      FOUNDRY_VERSION_UPGRADE_OPTION: ${{ vars.DEV_FOUNDRY_VERSION_UPGRADE_OPTION }}
+      FOUNDRY_REGION: ${{ vars.DEV_FOUNDRY_REGION }}
+      EXPECTED_OIDC_SUBJECT: ${{ vars.DEV_OIDC_SUBJECT }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate portable inputs and offline integrity
+        run: |
+          python -m unittest discover -s tests -v
+          python -m scripts.agent_pipeline validate
+      - name: Verify the actual GitHub OIDC subject
+        run: python -m scripts.verify_oidc
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.DEV_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.DEV_AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.DEV_AZURE_SUBSCRIPTION_ID }}
+      - name: Create and invoke an explicit dev version
+        run: python -m scripts.agent_pipeline verify
+      - name: Score the collected responses in Foundry
+        run: python -m scripts.cloud_evaluation
+      - name: Preserve complete or partial validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            04-foundry-agent-delivery/artifacts/verification.json
+            04-foundry-agent-delivery/artifacts/cloud-evaluation.json
+          if-no-files-found: warn
+      - name: Validation evidence summary
+        if: always()
+        run: |
+          for artifact in artifacts/verification.json artifacts/cloud-evaluation.json; do
+            if [ -f "$artifact" ]; then
+              printf '\n### %s\n```json\n' "$artifact" >> "$GITHUB_STEP_SUMMARY"
+              cat "$artifact" >> "$GITHUB_STEP_SUMMARY"
+              printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "mode": "advisory",
+  "dimensions": [
+    {
+      "id": "instruction_following",
+      "description": "Follows the user's explicit task and output constraints without adding unnecessary content.",
+      "weight": 5,
+      "always_applicable": true
+    },
+    {
+      "id": "relevance_clarity",
+      "description": "Provides a relevant, understandable response at the requested level of detail.",
+      "weight": 4,
+      "always_applicable": true
+    },
+    {
+      "id": "appropriate_bounds",
+      "description": "Avoids unsupported claims and stays within the requested task; no citation or keyword is treated as proof of correctness.",
+      "weight": 3,
+      "always_applicable": true
+    }
+  ]
+}

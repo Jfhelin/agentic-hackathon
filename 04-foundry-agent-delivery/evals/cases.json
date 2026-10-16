@@ -1,0 +1,23 @@
+[
+  {
+    "id": "exact-ready",
+    "prompt": "Reply with exactly READY and nothing else.",
+    "expected_behavior": "Follow the explicit output constraint and return only READY.",
+    "must_match": [
+      "^\\s*READY\\s*[.!]?\\s*$"
+    ],
+    "must_not_match": [
+      "(?i)I cannot|I can't"
+    ]
+  },
+  {
+    "id": "three-fruit-lines",
+    "prompt": "Name three different common fruits, one per line, with no numbering or other text.",
+    "expected_behavior": "Return exactly three non-empty lines; each line names one fruit; do not add other text.",
+    "must_match": [
+      "(?s)^\\s*[^\\r\\n]+\\r?\\n[^\\r\\n]+\\r?\\n[^\\r\\n]+\\s*$"
+    ],
+    "must_not_match": [
+    ]
+  }
+]

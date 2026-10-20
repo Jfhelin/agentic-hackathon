@@ -285,7 +285,7 @@ def preview_plan(config):
         build_template(template)
         Path(parameters).write_text(json.dumps(params), encoding="utf-8")
         preview[preview.index("--template-file") + 1] = template
-        preview.extend([f"@{parameters}", "-o", "json"])
+        preview.extend([f"@{parameters}", "--no-pretty-print", "-o", "json"])
         what_if = run(preview)
     return discovered, params, what_if, plan_hash(config, discovered, params, what_if)
 

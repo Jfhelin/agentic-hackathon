@@ -12,31 +12,6 @@ param identityPrefix string
 param devOidcSubject string
 param prodOidcSubject string
 
-var environmentNames = ['dev', 'prod']
-
-resource identityResourceGroup 'Microsoft.Resources/resourceGroups@2022-09-01' existing = {
-  name: identityResourceGroupName
-}
-
-resource devAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' existing = {
-  name: devAccountName
-  scope: resourceGroup(devResourceGroupName)
-}
-
-resource devProject 'Microsoft.CognitiveServices/accounts/projects@2025-06-01' existing = {
-  parent: devAccount
-  name: devProjectName
-}
-
-resource prodAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' existing = {
-  name: prodAccountName
-  scope: resourceGroup(prodResourceGroupName)
-}
-
-resource prodProject 'Microsoft.CognitiveServices/accounts/projects@2025-06-01' existing = {
-  parent: prodAccount
-  name: prodProjectName
-}
 
 resource agentRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
   name: guid(subscription().id, 'workshop-foundry-agent-release')
@@ -122,80 +97,43 @@ resource judgeRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
   }
 }
 
-resource identities 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = [for environmentName in environmentNames: {
-  name: '${identityPrefix}-${environmentName}'
-  location: location
+module identities 'modules/github-identities.bicep' = {
+  name: '${identityPrefix}-identities'
   scope: resourceGroup(identityResourceGroupName)
-}]
-
-resource federatedCredentials 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = [for (environmentName, index) in environmentNames: {
-  parent: identities[index]
-  name: 'github-${environmentName}'
-  properties: {
-    issuer: 'https://token.actions.githubusercontent.com'
-    subject: index == 0 ? devOidcSubject : prodOidcSubject
-    audiences: ['api://AzureADTokenExchange']
-  }
-}]
-
-resource devAgentAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(devProject.id, identities[0].id, agentRole.id)
-  scope: devProject
-  properties: {
-    roleDefinitionId: agentRole.id
-    principalId: identities[0].properties.principalId
-    principalType: 'ServicePrincipal'
+  params: {
+    location: location
+    identityPrefix: identityPrefix
+    devOidcSubject: devOidcSubject
+    prodOidcSubject: prodOidcSubject
   }
 }
 
-resource prodAgentAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(prodProject.id, identities[1].id, agentRole.id)
-  scope: prodProject
-  properties: {
-    roleDefinitionId: agentRole.id
-    principalId: identities[1].properties.principalId
-    principalType: 'ServicePrincipal'
+module devAccess 'modules/foundry-access.bicep' = {
+  name: '${identityPrefix}-access-dev'
+  scope: resourceGroup(devResourceGroupName)
+  params: {
+    accountName: devAccountName
+    projectName: devProjectName
+    identityId: identities.outputs.ids[0]
+    principalId: identities.outputs.principalIds[0]
+    agentRoleId: agentRole.id
+    inferenceRoleId: inferenceRole.id
+    evaluationRoleId: evaluationRole.id
+    judgeRoleId: judgeRole.id
   }
 }
 
-resource devInferenceAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(devAccount.id, identities[0].id, inferenceRole.id)
-  scope: devAccount
-  properties: {
-    roleDefinitionId: inferenceRole.id
-    principalId: identities[0].properties.principalId
-    principalType: 'ServicePrincipal'
+module prodAccess 'modules/foundry-access.bicep' = {
+  name: '${identityPrefix}-access-prod'
+  scope: resourceGroup(prodResourceGroupName)
+  params: {
+    accountName: prodAccountName
+    projectName: prodProjectName
+    identityId: identities.outputs.ids[1]
+    principalId: identities.outputs.principalIds[1]
+    agentRoleId: agentRole.id
+    inferenceRoleId: inferenceRole.id
   }
 }
 
-resource prodInferenceAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(prodAccount.id, identities[1].id, inferenceRole.id)
-  scope: prodAccount
-  properties: {
-    roleDefinitionId: inferenceRole.id
-    principalId: identities[1].properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-resource devEvaluationAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(devProject.id, identities[0].id, evaluationRole.id)
-  scope: devProject
-  properties: {
-    roleDefinitionId: evaluationRole.id
-    principalId: identities[0].properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-resource devJudgeAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(devAccount.id, identities[0].id, judgeRole.id)
-  scope: devAccount
-  properties: {
-    roleDefinitionId: judgeRole.id
-    principalId: identities[0].properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-output clientIds array = [for identity in identities: identity.properties.clientId]
+output clientIds array = identities.outputs.clientIds

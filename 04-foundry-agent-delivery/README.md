@@ -276,7 +276,8 @@ but that does not prevent evaluation or GitHub artifact retention.
 
 Cleanup is intentionally separate and is not automated by this lab. After
 instructor approval, identify the exact participant identities, federated
-credentials, role assignments, and GitHub variables to remove. Do not delete
+credentials, role assignments, `DEV_*`/`PROD_*` repository variables, and the
+`production` environment (if setup created it) to remove. Do not delete
 the participant's Foundry accounts, projects, deployments, repository, or
 shared workshop resource groups as part of identity cleanup.
 

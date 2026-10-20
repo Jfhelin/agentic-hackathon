@@ -1,0 +1,32 @@
+name: Check workshop setup
+
+on:
+  pull_request:
+    paths:
+      - 04-foundry-agent-delivery/infra/**
+      - 04-foundry-agent-delivery/scripts/**
+      - 04-foundry-agent-delivery/tests/**
+      - .github/workflows/check-setup.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 04-foundry-agent-delivery
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run offline tests
+        run: python -m unittest discover -s tests
+
+      - name: Compile the OIDC Bicep template
+        run: az bicep build --file infra/github-oidc.bicep --stdout > /dev/null

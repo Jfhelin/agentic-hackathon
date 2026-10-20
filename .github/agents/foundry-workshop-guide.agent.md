@@ -31,27 +31,36 @@ Microsoft Foundry agent the participant edits and promotes in the lab.
 1. Confirm the participant is in their own repository created from this
    template, and that the instructor supplied existing, isolated dev/prod
    Foundry projects and approved model deployments.
-2. Check that Python 3.12+, Azure CLI, and GitHub CLI are available. Have the
-   participant authenticate locally with `az login` and `gh auth login`. They
-   need GitHub repository admin access and Azure permission to create the
-   identities, role definitions, federated credentials, and scoped assignments.
+2. Have the participant authenticate locally with `az login` and
+   `gh auth login`. Setup checks Python 3.12+, CLI sign-in, the Bicep CLI, and
+   repository admin access first and prints the fix for each failure. They
+   also need Azure permission to create the identities, role definitions,
+   federated credentials, and scoped assignments.
 3. The participant runs one guided setup command from the lab directory:
-   `python scripts/bootstrap.py --setup`. It detects the copied repository,
-   asks for the subscription and assigned resource names, writes the ignored
-   `participant.json`, discovers endpoints/model policy, and displays the full
-   Azure what-if plan. Do not ask them to edit the example JSON by hand.
+   `python scripts/bootstrap.py --setup`. It detects the copied repository and
+   asks only for the subscription ID and the dev/prod project endpoints; it
+   derives account, project, and resource group, then offers numbered choices
+   for the model deployment and the dev prompt agent, and for production
+   reviewers. Instructors may supply the same values as flags (see
+   `--help`). It writes the ignored `participant.json` and displays the full
+   Azure what-if plus a change summary and warnings. Do not ask them to edit
+   the example JSON by hand.
 4. Explain the discovered region and model name, version, deployment type, and
    upgrade policy. The participant compares them with instructor-approved
    policy and reviews every proposed change. Setup creates two user-assigned
    identities, federated credentials, custom roles, scoped assignments, and
-   repository variables. Explain the `AIServices/assets/write` permission.
+   repository variables, and, if reviewers were given, a `production`
+   environment that requires their approval and only deploys from `main`.
+   Explain the `AIServices/assets/write` permission. `Modify` on existing role
+   assignments is expected on reruns.
    The script rechecks the plan and applies only if the participant enters the
    exact displayed plan SHA-256. Never confirm or type it for them.
 5. If GitHub's actual OIDC `sub` claim differs from the exact configured
    subject, stop before Azure login. Show the mismatch and help the participant
    choose the correct legacy/immutable subject format in their local config
    and rerun setup. Never use wildcard trust.
-6. If Capture cannot open a PR, explain that a repository administrator may
+6. If setup warned that Actions cannot create pull requests, or Capture cannot
+   open a PR, explain that a repository administrator may
    need to allow Actions to create pull requests. The workflow never approves or
    merges PRs; do not add a PAT or enable approval on the participant's behalf.
 

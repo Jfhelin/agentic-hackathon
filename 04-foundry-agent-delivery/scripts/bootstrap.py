@@ -6,17 +6,59 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
 IMMUTABLE_SUBJECTS_START = datetime(2026, 7, 15, tzinfo=timezone.utc)
+MIN_PYTHON = (3, 12)
+DEFAULT_AGENT_NAME = "workshop-agent"
+GITHUB_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
 
 
 class BootstrapError(RuntimeError):
     """An expected configuration, discovery, or bootstrap failure."""
+
+
+def check_prerequisites():
+    """Fail fast with actionable hints before prompting or calling Azure."""
+    problems = []
+    if sys.version_info < MIN_PYTHON:
+        problems.append(
+            f"Python {'.'.join(map(str, MIN_PYTHON))}+ is required; "
+            f"found {sys.version.split()[0]}."
+        )
+    missing = [tool for tool in ("az", "gh") if shutil.which(tool) is None]
+    for tool in missing:
+        problems.append(
+            "Azure CLI (az) is not installed." if tool == "az"
+            else "GitHub CLI (gh) is not installed."
+        )
+    checks = [
+        ("az", ["az", "account", "show", "-o", "none"], "Sign in with `az login`."),
+        ("gh", ["gh", "auth", "status"], "Sign in with `gh auth login`."),
+        (
+            "az", ["az", "bicep", "version"],
+            "The Bicep CLI is missing or built for another CPU architecture. "
+            "Run `az bicep uninstall` and then `az bicep install` "
+            "(Apple silicon: `az bicep install --target-platform osx-arm64`).",
+        ),
+    ]
+    for tool, command, hint in checks:
+        if tool in missing:
+            continue
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode:
+            problems.append(f"`{' '.join(command)}` failed. {hint}")
+    if problems:
+        raise BootstrapError(
+            "Prerequisite checks failed:\n- " + "\n- ".join(problems)
+        )
 
 
 def run(command, *, input_text=None, check=True):
@@ -35,9 +77,10 @@ def validate_config(config):
         "schema_version", "repository", "subscription_id", "identity_resource_group",
         "oidc_subject_format", "agent_name", "environments",
     }
+    optional = {"production_reviewers"}
     if (
         not isinstance(config, dict)
-        or set(config) != expected
+        or not expected <= set(config) <= expected | optional
         or type(config.get("schema_version")) is not int
         or config["schema_version"] != 1
         or not isinstance(config["environments"], dict)
@@ -53,6 +96,13 @@ def validate_config(config):
         raise BootstrapError("subscription_id must be an explicit UUID.")
     if config["oidc_subject_format"] not in {"auto", "legacy", "immutable"}:
         raise BootstrapError("oidc_subject_format must be auto, legacy, or immutable.")
+    reviewers = config.get("production_reviewers", [])
+    if (
+        not isinstance(reviewers, list)
+        or len(set(reviewers)) != len(reviewers)
+        or not all(isinstance(login, str) and GITHUB_LOGIN.fullmatch(login) for login in reviewers)
+    ):
+        raise BootstrapError("production_reviewers must be a list of unique GitHub logins.")
     for environment, values in config["environments"].items():
         required = {
             "resource_group", "account_name", "project_name", "model_deployment",
@@ -76,30 +126,227 @@ def validate_config(config):
     return config
 
 
-def prompt_config(repository):
+SUBSCRIPTION_ID = re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
+PROJECT_ENDPOINT = re.compile(
+    r"https://(?P<account>[A-Za-z0-9][A-Za-z0-9-]*)\.services\.ai\.azure\.com"
+    r"/api/projects/(?P<project>[A-Za-z0-9][A-Za-z0-9_.-]*)/?"
+)
+
+
+def parse_project_endpoint(value):
+    match = PROJECT_ENDPOINT.fullmatch(value.strip())
+    if not match:
+        raise BootstrapError(
+            "Expected a Foundry project endpoint like "
+            "https://<account>.services.ai.azure.com/api/projects/<project>."
+        )
+    return match["account"], match["project"]
+
+
+class AzureLookup:
+    """Read-only lookups scoped to the single subscription the participant provides."""
+
+    def check_subscription(self, subscription_id):
+        try:
+            account = run([
+                "az", "account", "show", "--subscription", subscription_id, "-o", "json",
+            ])
+        except subprocess.CalledProcessError as error:
+            raise BootstrapError(
+                "Your az login cannot see that subscription. Check the ID, or run "
+                "`az login --tenant <tenant-id>` for the workshop tenant."
+            ) from error
+        if account.get("id", "").lower() != subscription_id.lower():
+            raise BootstrapError("Azure CLI returned a different subscription than requested.")
+
+    def account_resource_group(self, subscription_id, account_name):
+        groups = run([
+            "az", "resource", "list", "--subscription", subscription_id,
+            "--resource-type", "Microsoft.CognitiveServices/accounts",
+            "--name", account_name, "--query", "[].resourceGroup", "-o", "json",
+        ]) or []
+        if len(groups) != 1:
+            raise BootstrapError(
+                f"Foundry account {account_name!r} was not found in subscription "
+                f"{subscription_id}. Check the endpoint and subscription."
+            )
+        return groups[0]
+
+    def model_deployments(self, subscription_id, values):
+        result = run([
+            "az", "rest", "--subscription", subscription_id, "--method", "get", "--url",
+            f"https://management.azure.com{account_resource_id(subscription_id, values)}"
+            "/deployments?api-version=2025-06-01", "-o", "json",
+        ]) or {}
+        return {
+            item["name"]: item.get("properties", {}).get("model", {}).get("name", "")
+            for item in result.get("value", []) if isinstance(item.get("name"), str)
+        }
+
+    def prompt_agents(self, subscription_id, endpoint):
+        return list_prompt_agents(subscription_id, endpoint)
+
+
+def _ask(prompt, preset=None, default=None):
+    if preset:
+        print(f"{prompt}: {preset}")
+        return preset
+    suffix = f" [{default}]" if default else ""
+    return input(f"{prompt}{suffix}: ").strip() or (default or "")
+
+
+def _ask_valid(prompt, check, preset=None, default=None):
+    """Re-ask only the failing answer instead of losing the whole setup."""
+    while True:
+        answer = _ask(prompt, preset, default)
+        try:
+            return check(answer)
+        except BootstrapError as error:
+            if preset:
+                raise
+            print(f"  {error} Try again.")
+
+
+def _choose(prompt, options, preset=None, default=None, strict=False):
+    if preset:
+        print(f"{prompt}: {preset}")
+        return preset
+    for index, label in enumerate(options, start=1):
+        print(f"  {index}. {label}")
+
+    def check(answer):
+        if answer.isdigit() and 1 <= int(answer) <= len(options):
+            return options[int(answer) - 1]
+        if answer in options or (answer and not strict):
+            return answer
+        raise BootstrapError(
+            f"Choose one of the listed options (1-{len(options)})."
+            if answer else "A value is required."
+        )
+    return _ask_valid(f"{prompt} (number or name)", check, default=default)
+
+
+def choose_agent(available, preset=None):
+    if preset:
+        print(f"Foundry agent name: {preset}")
+        return preset
+    if not available:
+        print(
+            "No saved prompt agents were found in the dev project. Create and save "
+            "one in the Foundry portal before running Capture."
+        )
+        return _ask("Foundry agent name", default=DEFAULT_AGENT_NAME)
+    print("Prompt agents in the dev project:")
+    return _choose(
+        "Foundry agent to promote", available,
+        default=available[0] if len(available) == 1 else None, strict=True,
+    )
+
+
+def choose_deployment(environment, deployments, preset=None, preferred=None):
+    if preset:
+        if preset not in deployments:
+            raise BootstrapError(
+                f"{environment} account has no model deployment named {preset!r}; "
+                f"found {sorted(deployments) or 'none'}."
+            )
+        print(f"  Model deployment: {preset}")
+        return preset
+    chat = sorted(name for name, model in deployments.items() if "embedding" not in model)
+    if not chat:
+        raise BootstrapError(f"{environment} account has no chat model deployment.")
+    default = preferred if preferred in chat else chat[0] if len(chat) == 1 else None
+    print(f"  {environment.upper()} model deployments:")
+    return _choose("  Approved model deployment", chat, default=default, strict=True)
+
+
+def prompt_config(repository, presets=None, lookup=None, current_login=None):
+    """Collect the minimum inputs; everything else is looked up in one subscription."""
+    presets = presets or {}
+    lookup = lookup or AzureLookup()
     print(f"Using GitHub repository: {repository}")
-    print("Enter the existing Foundry resources assigned to you by the instructor.")
+    print("Enter the Foundry details assigned to you by the instructor.")
+
+    def check_subscription(value):
+        if not SUBSCRIPTION_ID.fullmatch(value):
+            raise BootstrapError("Subscription ID must be a GUID.")
+        lookup.check_subscription(value)
+        return value
+    subscription = _ask_valid(
+        "Azure subscription ID", check_subscription, presets.get("subscription_id"),
+    )
+    environments = {}
+    endpoints = {}
+    for environment in ("dev", "prod"):
+        print(f"{environment.upper()} Foundry project")
+
+        def check_endpoint(value, environment=environment):
+            account, project = parse_project_endpoint(value)
+            group = presets.get(f"{environment}_resource_group") or (
+                lookup.account_resource_group(subscription, account)
+            )
+            return value.strip().rstrip("/"), {
+                "resource_group": group, "account_name": account,
+                "project_name": project, "model_deployment": "",
+            }
+        endpoints[environment], values = _ask_valid(
+            "  Project endpoint", check_endpoint, presets.get(f"{environment}_endpoint"),
+        )
+        print(f"  Resource group: {values['resource_group']}")
+        values["model_deployment"] = choose_deployment(
+            environment, lookup.model_deployments(subscription, values),
+            presets.get("model_deployment"),
+            environments.get("dev", {}).get("model_deployment"),
+        )
+        environments[environment] = values
+    identity_group = _ask(
+        "Resource group for the two GitHub identities",
+        presets.get("identity_resource_group"), environments["dev"]["resource_group"],
+    )
+    available = []
+    if not presets.get("agent_name"):
+        try:
+            available = lookup.prompt_agents(subscription, endpoints["dev"])
+        except BootstrapError as error:
+            print(f"Could not list dev agents ({error}); enter the name manually.")
+    agent_name = choose_agent(available, presets.get("agent_name"))
+    reviewers = presets.get("production_reviewers")
+    if reviewers is None:
+        answer = _ask(
+            "GitHub logins required to approve production deploys "
+            "(comma-separated, 'none' to skip)",
+            default=current_login,
+        )
+        reviewers = [] if answer.lower() in {"", "none"} else [
+            login.strip() for login in answer.split(",") if login.strip()
+        ]
     config = {
         "schema_version": 1,
         "repository": repository,
-        "subscription_id": input("Azure subscription ID: ").strip(),
-        "identity_resource_group": input(
-            "Existing resource group for the two GitHub identities: "
-        ).strip(),
+        "subscription_id": subscription,
+        "identity_resource_group": identity_group,
         "oidc_subject_format": "auto",
-        "agent_name": input("Foundry agent name [workshop-agent]: ").strip()
-        or "workshop-agent",
-        "environments": {},
+        "agent_name": agent_name,
+        "environments": environments,
     }
-    for environment in ("dev", "prod"):
-        print(f"{environment.upper()} Foundry project")
-        config["environments"][environment] = {
-            "resource_group": input("  Resource group: ").strip(),
-            "account_name": input("  Foundry account: ").strip(),
-            "project_name": input("  Foundry project: ").strip(),
-            "model_deployment": input("  Approved model deployment: ").strip(),
-        }
+    if reviewers:
+        config["production_reviewers"] = reviewers
     return validate_config(config)
+
+
+def current_login():
+    result = subprocess.run(
+        ["gh", "api", "user", "--jq", ".login"], capture_output=True, text=True, check=False,
+    )
+    return result.stdout.strip() or None
+
+
+def check_repository_admin(repository):
+    repo = run(["gh", "api", f"repos/{repository}"])
+    if not repo.get("permissions", {}).get("admin"):
+        raise BootstrapError(
+            f"You need admin access to {repository} to set Actions variables and environments."
+        )
 
 
 def current_repository():
@@ -144,6 +391,86 @@ def subjects(config, repo):
     }
 
 
+def account_resource_id(subscription_id, values):
+    return (
+        f"/subscriptions/{subscription_id}/resourceGroups/{values['resource_group']}"
+        f"/providers/Microsoft.CognitiveServices/accounts/{values['account_name']}"
+    )
+
+
+def project_endpoint(subscription_id, values, environment="dev"):
+    project = run([
+        "az", "rest", "--subscription", subscription_id, "--method", "get", "--url",
+        f"https://management.azure.com{account_resource_id(subscription_id, values)}"
+        f"/projects/{values['project_name']}?api-version=2025-06-01",
+        "-o", "json",
+    ])
+    if project.get("properties", {}).get("provisioningState") != "Succeeded":
+        raise BootstrapError(f"{environment} Foundry project is not ready.")
+    endpoint = project.get("properties", {}).get("endpoints", {}).get("AI Foundry API")
+    if not isinstance(endpoint, str) or not endpoint.startswith("https://"):
+        raise BootstrapError(f"{environment} project did not return a Foundry API endpoint.")
+    return endpoint
+
+
+def list_prompt_agents(subscription_id, endpoint):
+    """Return saved prompt-agent names using the participant's own Entra sign-in."""
+    token = subprocess.run(
+        [
+            "az", "account", "get-access-token", "--subscription", subscription_id,
+            "--resource", "https://ai.azure.com", "--query", "accessToken", "-o", "tsv",
+        ],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
+    if not token:
+        raise BootstrapError("could not get a Foundry access token")
+    request = Request(
+        f"{endpoint}/agents?api-version=v1&limit=100",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = json.load(response)
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise BootstrapError(f"listing agents failed: {error}") from error
+    return sorted(
+        agent["name"] for agent in payload.get("data", [])
+        if isinstance(agent, dict) and isinstance(agent.get("name"), str)
+        and agent.get("versions", {}).get("latest", {}).get("definition", {}).get("kind")
+        == "prompt"
+    )
+
+
+def discover_github(config, repo):
+    """Return proposed GitHub settings (hashed) and read-only warnings."""
+    warnings = []
+    workflow = run([
+        "gh", "api", f"repos/{config['repository']}/actions/permissions/workflow",
+    ], check=False) or {}
+    if not workflow.get("can_approve_pull_request_reviews"):
+        warnings.append(
+            "Capture cannot open PRs until a repository admin enables Settings -> Actions "
+            "-> General -> 'Allow GitHub Actions to create and approve pull requests'."
+        )
+    reviewers = []
+    for login in config.get("production_reviewers", []):
+        user = run(["gh", "api", f"users/{login}"])
+        reviewers.append({"login": user["login"], "id": user["id"]})
+    environment = None
+    if reviewers:
+        environment = {
+            "name": "production",
+            "required_reviewers": reviewers,
+            "deployment_branch": repo["default_branch"],
+        }
+    else:
+        warnings.append(
+            "No production reviewers configured: the production environment separates "
+            "the OIDC subject but is not an approval gate."
+        )
+    return {"production_environment": environment}, warnings
+
+
 def discover(config):
     sub = config["subscription_id"]
     account = run(["az", "account", "show", "--subscription", sub, "-o", "json"])
@@ -162,26 +489,12 @@ def discover(config):
     oidc_subjects = subjects(config, repo)
     bindings = {}
     for environment, values in config["environments"].items():
-        account_id = (
-            f"/subscriptions/{sub}/resourceGroups/{values['resource_group']}"
-            f"/providers/Microsoft.CognitiveServices/accounts/{values['account_name']}"
-        )
+        account_id = account_resource_id(sub, values)
         account_resource = run([
             "az", "rest", "--subscription", sub, "--method", "get", "--url",
             f"https://management.azure.com{account_id}?api-version=2025-06-01", "-o", "json",
         ])
-        project = run([
-            "az", "rest", "--subscription", sub, "--method", "get", "--url",
-            f"https://management.azure.com{account_id}/projects/{values['project_name']}"
-            "?api-version=2025-06-01",
-            "-o", "json",
-        ])
-        if project.get("properties", {}).get("provisioningState") != "Succeeded":
-            raise BootstrapError(f"{environment} Foundry project is not ready.")
-        endpoints = project.get("properties", {}).get("endpoints", {})
-        endpoint = endpoints.get("AI Foundry API")
-        if not isinstance(endpoint, str) or not endpoint.startswith("https://"):
-            raise BootstrapError(f"{environment} project did not return a Foundry API endpoint.")
+        endpoint = project_endpoint(sub, values, environment)
         deployment = run([
             "az", "rest", "--subscription", sub, "--method", "get", "--url",
             f"https://management.azure.com{account_id}/deployments/"
@@ -215,12 +528,24 @@ def discover(config):
     prefix = "workshop-" + hashlib.sha256(
         config["repository"].encode("utf-8")
     ).hexdigest()[:12]
+    github, warnings = discover_github(config, repo)
+    try:
+        dev_agents = list_prompt_agents(sub, bindings["dev"]["FOUNDRY_PROJECT_ENDPOINT"])
+        if config["agent_name"] not in dev_agents:
+            warnings.append(
+                f"Agent {config['agent_name']!r} has no saved prompt version in the dev "
+                f"project yet; Capture needs one. Found: {dev_agents or 'none'}."
+            )
+    except BootstrapError as error:
+        warnings.append(f"Could not check the dev agent name: {error}.")
     return {
         "repository": repo,
         "resource_groups": group_info,
         "identity_prefix": prefix,
         "oidc_subjects": oidc_subjects,
         "bindings": bindings,
+        "github": github,
+        "warnings": warnings,
     }
 
 
@@ -254,6 +579,7 @@ def plan_hash(config, discovered, parameters, what_if):
         "identity_prefix": discovered["identity_prefix"],
         "oidc_subjects": discovered["oidc_subjects"],
         "bindings": discovered["bindings"],
+        "github": discovered.get("github"),
         "parameters": parameters["parameters"],
         "what_if": what_if,
     }
@@ -285,7 +611,7 @@ def preview_plan(config):
         build_template(template)
         Path(parameters).write_text(json.dumps(params), encoding="utf-8")
         preview[preview.index("--template-file") + 1] = template
-        preview.extend([f"@{parameters}", "-o", "json"])
+        preview.extend([f"@{parameters}", "--no-pretty-print", "-o", "json"])
         what_if = run(preview)
     return discovered, params, what_if, plan_hash(config, discovered, params, what_if)
 
@@ -297,11 +623,79 @@ def print_preview(config, discovered, params, what_if, fingerprint, mode):
         "identity_prefix": discovered["identity_prefix"],
         "oidc_subjects": discovered["oidc_subjects"],
         "bindings": discovered["bindings"],
+        "github_changes": discovered.get("github"),
         "bicep_parameters": params["parameters"],
         "what_if": what_if,
         "plan_sha256": fingerprint,
         "mode": mode,
     }, indent=2))
+    print("\nSummary of proposed changes:")
+    for line in summarize_changes(what_if, discovered.get("github")):
+        print(f"  {line}")
+    for warning in discovered.get("warnings", []):
+        print(f"WARNING: {warning}")
+
+
+def summarize_changes(what_if, github=None):
+    """One line per Azure/GitHub change, skipping resources that stay as they are."""
+    lines = []
+    rerun_noise = False
+    for change in (what_if or {}).get("changes", []):
+        kind = change.get("changeType")
+        if kind in {"Ignore", "NoChange"}:
+            continue
+        resource = change.get("resourceId", "").split("/providers/", 1)[-1]
+        lines.append(f"{kind:<8} {resource.replace('/providers/', ' -> ')}")
+        rerun_noise = rerun_noise or (
+            kind == "Modify" and "roleAssignments/" in resource
+        )
+    if rerun_noise:
+        lines.append(
+            "         (Modify on an existing role assignment is expected on reruns: what-if "
+            "cannot resolve identity principal IDs until deployment.)"
+        )
+    environment = (github or {}).get("production_environment")
+    if environment:
+        logins = ", ".join(r["login"] for r in environment["required_reviewers"])
+        lines.append(
+            f"GitHub   environment {environment['name']}: required reviewers {logins}; "
+            f"deploys only from {environment['deployment_branch']}"
+        )
+    lines.append("GitHub   DEV_* and PROD_* repository variables")
+    return lines
+
+
+def configure_production_environment(config, discovered):
+    environment = (discovered.get("github") or {}).get("production_environment")
+    if not environment:
+        return
+    repository = config["repository"]
+    path = f"repos/{repository}/environments/{environment['name']}"
+    body = {
+        "reviewers": [
+            {"type": "User", "id": reviewer["id"]}
+            for reviewer in environment["required_reviewers"]
+        ],
+        "deployment_branch_policy": {
+            "protected_branches": False, "custom_branch_policies": True,
+        },
+    }
+    try:
+        run(["gh", "api", "--method", "PUT", path, "--input", "-"], input_text=json.dumps(body))
+        policies = run(["gh", "api", f"{path}/deployment-branch-policies"]) or {}
+        names = {policy.get("name") for policy in policies.get("branch_policies", [])}
+        if environment["deployment_branch"] not in names:
+            run([
+                "gh", "api", "--method", "POST", f"{path}/deployment-branch-policies",
+                "-f", f"name={environment['deployment_branch']}", "-f", "type=branch",
+            ])
+    except subprocess.CalledProcessError as error:
+        raise BootstrapError(
+            "Azure access and repository variables were applied, but the production "
+            "environment protection could not be set. Required reviewers may not be "
+            "available for this repository's plan/visibility; remove production_reviewers "
+            f"from the config or configure it manually. {error.stderr or ''}".strip()
+        ) from error
 
 
 def apply(config, discovered):
@@ -330,6 +724,21 @@ def apply(config, discovered):
                 "gh", "variable", "set", f"{environment.upper()}_{name}",
                 "--repo", config["repository"], "--body", value,
             ])
+    configure_production_environment(config, discovered)
+
+
+SETUP_OPTIONS = {
+    "subscription": ("subscription_id", "Azure subscription ID (never listed or searched)"),
+    "dev_endpoint": ("dev_endpoint", "Dev Foundry project endpoint"),
+    "prod_endpoint": ("prod_endpoint", "Prod Foundry project endpoint"),
+    "dev_resource_group": ("dev_resource_group", "Dev resource group (looked up if omitted)"),
+    "prod_resource_group": ("prod_resource_group", "Prod resource group (looked up if omitted)"),
+    "model_deployment": ("model_deployment", "Approved model deployment name used in dev and prod"),
+    "identity_resource_group": (
+        "identity_resource_group", "Resource group for the GitHub identities (defaults to dev)",
+    ),
+    "agent_name": ("agent_name", "Foundry prompt agent to promote"),
+}
 
 
 def main():
@@ -347,19 +756,50 @@ def main():
         "--confirm-plan",
         help="Exact plan SHA-256 printed by a prior preview; required together with --apply.",
     )
+    setup_group = parser.add_argument_group(
+        "setup values", "Optional with --setup; anything omitted is prompted for."
+    )
+    for option, (_, help_text) in SETUP_OPTIONS.items():
+        setup_group.add_argument(f"--{option.replace('_', '-')}", help=help_text)
+    setup_group.add_argument(
+        "--production-reviewer", action="append", metavar="LOGIN",
+        help="GitHub login required to approve production deploys (repeatable).",
+    )
+    setup_group.add_argument(
+        "--no-production-reviewers", action="store_true",
+        help="Do not configure required reviewers on the production environment.",
+    )
     args = parser.parse_args()
+    presets = {
+        key: getattr(args, option) for option, (key, _) in SETUP_OPTIONS.items()
+        if getattr(args, option)
+    }
+    if args.no_production_reviewers:
+        presets["production_reviewers"] = []
+    elif args.production_reviewer:
+        presets["production_reviewers"] = args.production_reviewer
     try:
         if args.setup and (args.apply or args.confirm_plan):
             raise BootstrapError("--setup cannot be combined with --apply or --confirm-plan.")
         if args.apply != bool(args.confirm_plan):
             raise BootstrapError("--apply requires --confirm-plan, and --confirm-plan requires --apply.")
+        if presets and not args.setup:
+            raise BootstrapError("Setup values can only be passed together with --setup.")
+        if args.production_reviewer and args.no_production_reviewers:
+            raise BootstrapError(
+                "--production-reviewer cannot be combined with --no-production-reviewers."
+            )
+        check_prerequisites()
         config_path = Path(args.config)
         if args.setup:
             if config_path.exists():
                 raise BootstrapError(
-                    f"{config_path} already exists; review it or choose another --config path."
+                    f"{config_path} already exists. Run without --setup to preview it, "
+                    "edit it, or choose another --config path."
                 )
-            config = prompt_config(current_repository())
+            repository = current_repository()
+            check_repository_admin(repository)
+            config = prompt_config(repository, presets, current_login=current_login())
             config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
             print(f"Saved participant-only configuration to {config_path}.")
         else:
@@ -375,7 +815,7 @@ def main():
                 "policy and review every proposed Azure change above."
             )
             confirmation = input(
-                f"To apply this exact plan and set GitHub repository variables, "
+                f"To apply this exact plan and the GitHub settings above, "
                 f"enter its SHA-256 ({fingerprint}): "
             ).strip()
             if confirmation != fingerprint:

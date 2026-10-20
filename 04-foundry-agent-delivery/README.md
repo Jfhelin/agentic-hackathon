@@ -39,8 +39,8 @@ flowchart LR
 
 The Copilot custom agent is the **workshop guide**, not the Foundry agent being
 promoted. It guides setup and each stage. The participant runs one interactive
-bootstrap command that collects resource names, discovers endpoints and model
-policy, and previews the Azure changes. Azure access is applied only after the
+bootstrap command that collects a subscription ID and project endpoints,
+discovers resource groups, deployments, agents, and model policy, and previews the Azure changes. Azure access is applied only after the
 participant reviews the plan and enters its exact hash.
 
 ## Delivery stages
@@ -91,6 +91,9 @@ participant reviews the plan and enters its exact hash.
    the issued token's `sub` claim and compare it with the exact bootstrapped
    subject before Azure login. A mismatch fails closed. Do not replace the
    subject with a wildcard.
+6. The **Check workshop setup** workflow runs the offline tests and compiles
+   the OIDC Bicep template on PRs that change `infra/`, `scripts/`, or
+   `tests/`. Keep it green before publishing template changes.
 
 ### Participant one-time setup
 
@@ -101,15 +104,48 @@ cd 04-foundry-agent-delivery
 python scripts/bootstrap.py --setup
 ```
 
-The setup prompts for the explicit subscription, identity resource group, and
-assigned dev/prod resource, account, project, and deployment names. The
-repository is detected from the current Git checkout; the agent name defaults
-to `workshop-agent`. It saves the participant-only config to the ignored
-`participant.json`, then prints the discovered endpoint/model policies and
-Azure `what-if`. Compare the discovered values with the instructor's policy
-and review the full plan. Enter the exact displayed SHA-256 only if you approve
-those changes. Setup repeats discovery and `what-if`, and stops without
-applying if the plan changed. It never changes the active Azure subscription.
+Setup first checks prerequisites (Python, `az`/`gh` sign-in, a working Bicep
+CLI, repository admin access) and prints the fix for anything missing. It then
+asks only for:
+
+1. The **subscription ID**. It is checked directly; subscriptions are never
+   listed or searched, so large tenants are not a problem.
+2. The **dev and prod project endpoints**, for example
+   `https://<account>.services.ai.azure.com/api/projects/<project>`. Account,
+   project, and resource group are derived from the endpoint within that one
+   subscription.
+3. The **model deployment** and **agent** to promote, chosen from numbered
+   lists read from the dev/prod accounts and the dev project. A single
+   deployment is the default; an unlisted agent is rejected.
+4. The **production reviewers** (defaults to your GitHub login, `none` skips).
+
+A mistyped answer is re-asked instead of ending setup. Instructors can hand out
+a single non-interactive command instead:
+
+```bash
+python scripts/bootstrap.py --setup \
+  --subscription <subscription-id> \
+  --dev-endpoint https://<dev-account>.services.ai.azure.com/api/projects/<dev-project> \
+  --prod-endpoint https://<prod-account>.services.ai.azure.com/api/projects/<prod-project> \
+  --model-deployment <deployment> --agent-name <agent> --production-reviewer <login>
+```
+
+Run `python scripts/bootstrap.py --help` for every option. The identity
+resource group defaults to the dev resource group.
+
+The config is saved to the ignored `participant.json`. Setup then prints the
+discovered endpoint/model policies, the full Azure `what-if`, a short summary
+of the real changes, and any warnings (for example, the agent has no saved
+prompt version, or **Allow GitHub Actions to create and approve pull requests**
+is off; that setting is only reported, never changed). When reviewers are
+given, the plan also creates the `production` environment with those required
+reviewers and a `main`-only branch policy, so Deploy waits for approval.
+Reviewers are part of the plan hash. On reruns, `Modify` on existing role
+assignments is expected because what-if cannot resolve principal IDs.
+
+Enter the exact displayed SHA-256 only if you approve those changes. Setup
+repeats discovery and `what-if`, and stops without applying if the plan
+changed. It never changes the active Azure subscription.
 
 Requires Python 3.12+, Azure CLI, and GitHub CLI; Azure CLI handles the Bicep
 build. Authenticate only with local `az login` and `gh auth login`. The
@@ -217,6 +253,11 @@ but that does not prevent evaluation or GitHub artifact retention.
 - **Quota, preview, or regional errors:** retain partial evidence, check current
   Foundry regional support and quota, and reduce run cadence only through an
   instructor-approved change.
+- **`az bicep` fails on Apple silicon:** the installed Bicep binary is for the
+  wrong CPU. Run `az bicep uninstall` and then
+  `az bicep install --target-platform osx-arm64`.
+- **`az` cannot see the subscription:** sign in to the workshop tenant with
+  `az login --tenant <tenant-id>`; setup never searches other subscriptions.
 - **No protected production environment:** require an independent human to
   control who can dispatch Deploy. The workflow's provenance checks are not
   independent release approval.
@@ -235,7 +276,8 @@ but that does not prevent evaluation or GitHub artifact retention.
 
 Cleanup is intentionally separate and is not automated by this lab. After
 instructor approval, identify the exact participant identities, federated
-credentials, role assignments, and GitHub variables to remove. Do not delete
+credentials, role assignments, `DEV_*`/`PROD_*` repository variables, and the
+`production` environment (if setup created it) to remove. Do not delete
 the participant's Foundry accounts, projects, deployments, repository, or
 shared workshop resource groups as part of identity cleanup.
 

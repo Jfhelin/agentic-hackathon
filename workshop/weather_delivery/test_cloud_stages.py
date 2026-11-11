@@ -30,6 +30,14 @@ from workshop.weather_delivery.test_contract import manifest
 
 
 SUBJECT = "repo:example/workshop:ref:refs/heads/FY27"
+IMMUTABLE_SUBJECT = "repo:example@123/workshop@456:ref:refs/heads/FY27"
+EVENT = {"repository": {"full_name": "example/workshop", "id": 456, "owner": {
+    "login": "example", "id": 123,
+}}}
+CLAIMS = {
+    "repository": "example/workshop", "repository_id": "456",
+    "repository_owner_id": "123", "ref": "refs/heads/FY27",
+}
 PROJECT_ENDPOINT = "https://project.example.invalid/api/projects/lab"
 PROD_ENDPOINT = (
     "https://project.example.invalid/api/projects/lab/agents/weather-prod/"
@@ -124,7 +132,9 @@ class OidcTests(unittest.TestCase):
         for branch in ("FY27", "rehearsal/test"):
             ref = f"refs/heads/{branch}"
             subject = f"repo:example/workshop:ref:{ref}"
-            validate_delivery_context("example/workshop", ref, branch, subject)
+            immutable = f"repo:example@123/workshop@456:ref:{ref}"
+            for candidate in (subject, immutable):
+                validate_delivery_context("example/workshop", ref, branch, candidate, EVENT, "456", "123")
             for repo, actual_ref, selected, expected in (
                 ("example/workshop", ref.upper(), branch, subject),
                 ("example/workshop", ref, branch + "-other", subject),
@@ -132,7 +142,28 @@ class OidcTests(unittest.TestCase):
                 ("example/workshop", ref, branch, SUBJECT + "-other"),
             ):
                 with self.assertRaises(StageBlocked):
-                    validate_delivery_context(repo, actual_ref, selected, expected)
+                    validate_delivery_context(repo, actual_ref, selected, expected, EVENT, "456", "123")
+
+    def test_delivery_context_rejects_missing_or_mismatched_event_identity(self):
+        for event, repo_id, owner_id in (
+            ({}, "456", "123"),
+            ({"repository": {}}, "456", "123"),
+            ({"repository": {"full_name": "example/workshop", "id": 456,
+                             "owner": {"login": "other", "id": 123}}}, "456", "123"),
+            (EVENT, "457", "123"),
+            (EVENT, "456", "124"),
+            (EVENT, "", "123"),
+        ):
+            with self.assertRaises(StageBlocked):
+                validate_delivery_context("example/workshop", CLAIMS["ref"], "FY27",
+                                          IMMUTABLE_SUBJECT, event, repo_id, owner_id)
+        for subject in (
+            "repo:example@124/workshop@456:ref:refs/heads/FY27",
+            "repo:example@123/workshop@457:ref:refs/heads/FY27",
+        ):
+            with self.assertRaises(StageBlocked):
+                validate_delivery_context("example/workshop", CLAIMS["ref"], "FY27",
+                                          subject, EVENT, "456", "123")
 
     @patch("workshop.weather_delivery.cloud_stages.verify_github_oidc")
     def test_delivery_oidc_checks_context_before_request(self, verify):
@@ -141,10 +172,36 @@ class OidcTests(unittest.TestCase):
             "GITHUB_REF": "refs/heads/FY27",
             "DELIVERY_BRANCH": "rehearsal",
         }
-        with patch.dict("os.environ", context, clear=True):
-            with self.assertRaises(StageBlocked):
-                verify_delivery_oidc(SUBJECT)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "event.json"
+            path.write_text(json.dumps(EVENT))
+            context.update({"GITHUB_EVENT_PATH": str(path), "GITHUB_REPOSITORY_ID": "456",
+                            "GITHUB_REPOSITORY_OWNER_ID": "123"})
+            with patch.dict("os.environ", context, clear=True):
+                with self.assertRaises(StageBlocked):
+                    verify_delivery_oidc(SUBJECT)
         verify.assert_not_called()
+
+    @patch("workshop.weather_delivery.cloud_stages.verify_github_oidc")
+    def test_delivery_oidc_passes_exact_validated_context_to_token_check(self, verify):
+        context = {
+            "GITHUB_REPOSITORY": "example/workshop",
+            "GITHUB_REF": "refs/heads/FY27",
+            "DELIVERY_BRANCH": "FY27",
+            "GITHUB_REPOSITORY_ID": "456",
+            "GITHUB_REPOSITORY_OWNER_ID": "123",
+            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.actions.githubusercontent.com/oidc",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "event.json"
+            path.write_text(json.dumps(EVENT))
+            context["GITHUB_EVENT_PATH"] = str(path)
+            with patch.dict("os.environ", context, clear=True):
+                for subject in (SUBJECT, IMMUTABLE_SUBJECT):
+                    verify_delivery_oidc(subject)
+                    self.assertEqual(verify.call_args.args[2], subject)
+                    self.assertEqual(verify.call_args.kwargs["expected_claims"], CLAIMS)
 
     def test_exact_github_subject_is_verified(self):
         token = "header." + __import__("base64").urlsafe_b64encode(json.dumps({
@@ -152,6 +209,7 @@ class OidcTests(unittest.TestCase):
             "aud": "api://AzureADTokenExchange",
             "sub": SUBJECT,
             "exp": 9999999999,
+            **CLAIMS,
         }).encode()).decode().rstrip("=") + ".signature"
         opener = Mock(return_value=io.BytesIO(json.dumps({"value": token}).encode()))
         self.assertEqual(
@@ -159,6 +217,7 @@ class OidcTests(unittest.TestCase):
                 "https://token.actions.githubusercontent.com/oidc?sig=x",
                 "request-token",
                 SUBJECT,
+                expected_claims=CLAIMS,
                 opener=opener,
             ),
             SUBJECT,
@@ -183,14 +242,41 @@ class OidcTests(unittest.TestCase):
                 "https://pipelines.actions.githubusercontent.com/oidc",
                 "token",
                 SUBJECT,
+                expected_claims=CLAIMS,
                 opener=opener,
             )
 
     def test_untrusted_oidc_request_host_is_rejected_before_fetch(self):
         opener = Mock()
         with self.assertRaisesRegex(StageBlocked, "GitHub Actions HTTPS host"):
-            verify_github_oidc("https://actions.example/oidc", "token", SUBJECT, opener=opener)
+            verify_github_oidc("https://actions.example/oidc", "token", SUBJECT,
+                               expected_claims=CLAIMS, opener=opener)
         opener.assert_not_called()
+
+    def test_immutable_subject_and_exact_token_claims(self):
+        claims = {
+            "iss": "https://token.actions.githubusercontent.com",
+            "aud": "api://AzureADTokenExchange",
+            "sub": IMMUTABLE_SUBJECT, "exp": 9999999999, **CLAIMS,
+        }
+        def verify(payload):
+            token = "header." + __import__("base64").urlsafe_b64encode(
+                json.dumps(payload).encode()
+            ).decode().rstrip("=") + ".signature"
+            opener = Mock(return_value=io.BytesIO(json.dumps({"value": token}).encode()))
+            return verify_github_oidc("https://token.actions.githubusercontent.com/oidc",
+                                      "token", IMMUTABLE_SUBJECT,
+                                      expected_claims=CLAIMS, opener=opener)
+        self.assertEqual(verify(claims), IMMUTABLE_SUBJECT)
+        for key in CLAIMS:
+            for value in (None, "incorrect"):
+                with self.subTest(key=key, value=value), self.assertRaises(StageBlocked):
+                    altered = dict(claims)
+                    if value is None:
+                        del altered[key]
+                    else:
+                        altered[key] = value
+                    verify(altered)
 
     def test_azure_cli_token_must_match_configured_tenant_and_client(self):
         payload = {

@@ -11,7 +11,8 @@ from workshop.weather_delivery import repository_readiness as readiness
 
 def responses():
     return [
-        ("read", {"default_branch": "FY27", "permissions": {"admin": True}}),
+        ("read", {"default_branch": "FY27", "permissions": {"admin": True},
+                  "full_name": "owner/lab", "id": 456, "owner": {"id": 123}}),
         ("read", {"enabled": True, "allowed_actions": "all"}),
         ("read", [
             {"workflows": [{"path": path, "state": "active"}]}
@@ -95,6 +96,21 @@ class ReadinessTests(unittest.TestCase):
         report = readiness.inspect_repository("owner/lab", "FY27", "rehearsal")
         self.assertTrue(report["checks"]["delivery_branch_setting"].startswith("blocked:"))
         self.assertTrue(report["checks"]["oidc_subject_setting"].startswith("blocked:"))
+
+    @patch.object(readiness, "_read_api")
+    def test_immutable_subject_requires_matching_repository_metadata(self, api):
+        data = responses()
+        for item in data[-1][1][0]["variables"]:
+            if item["name"] == "WEATHER_CAPTURE_OIDC_SUBJECT":
+                item["value"] = "repo:owner@123/lab@456:ref:refs/heads/FY27"
+        api.side_effect = data
+        self.assertEqual(readiness.inspect_repository("owner/lab", "FY27")["checks"]["oidc_subject_setting"], "passed")
+        data[0][1]["id"] = 457
+        api.side_effect = data
+        self.assertTrue(readiness.inspect_repository("owner/lab", "FY27")["checks"]["oidc_subject_setting"].startswith("blocked:"))
+        del data[0][1]["id"]
+        api.side_effect = data
+        self.assertTrue(readiness.inspect_repository("owner/lab", "FY27")["checks"]["oidc_subject_setting"].startswith("unknown:"))
 
     @patch.object(readiness, "_read_api")
     def test_registered_workflow_is_not_proof_of_default_branch_file(self, api):

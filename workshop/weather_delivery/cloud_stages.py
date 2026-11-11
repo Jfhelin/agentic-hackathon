@@ -22,6 +22,7 @@ from workshop.weather_delivery.contract import (
     validate_manifest_files,
     validate_validation_evidence,
 )
+from workshop.weather_delivery.oidc_identity import delivery_subjects
 
 
 class StageBlocked(RuntimeError):
@@ -51,31 +52,55 @@ def _token_claims(token):
         raise StageBlocked("Azure CLI returned a token with unreadable identity claims") from error
 
 
-def validate_delivery_context(repository, ref, delivery_branch, expected_subject):
+def validate_delivery_context(repository, ref, delivery_branch, expected_subject, event, repository_id, owner_id):
     _require(
         bool(repository) and bool(delivery_branch)
         and ref == f"refs/heads/{delivery_branch}",
         "GitHub ref does not exactly match the configured delivery branch",
     )
+    event_repository = event.get("repository") if isinstance(event, dict) else None
+    owner = event_repository.get("owner") if isinstance(event_repository, dict) else None
     _require(
-        expected_subject == f"repo:{repository}:ref:{ref}",
+        isinstance(owner, dict)
+        and event_repository.get("full_name") == repository
+        and owner.get("login") == repository.split("/")[0]
+        and type(event_repository.get("id")) is int
+        and type(owner.get("id")) is int
+        and str(event_repository["id"]) == repository_id
+        and str(owner["id"]) == owner_id,
+        "GitHub event repository and immutable IDs do not match the runner context",
+    )
+    try:
+        subjects = delivery_subjects(repository, owner_id, repository_id, ref)
+    except ValueError as error:
+        raise StageBlocked(str(error)) from error
+    _require(
+        expected_subject in subjects,
         "Configured OIDC subject does not exactly match the delivery repository and ref",
     )
+    return {
+        "repository": repository, "repository_id": repository_id,
+        "repository_owner_id": owner_id, "ref": ref,
+    }
 
 
 def verify_delivery_oidc(expected_subject):
-    validate_delivery_context(
+    with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as event_file:
+        event = json.load(event_file)
+    expected_claims = validate_delivery_context(
         os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_REF"],
-        os.environ["DELIVERY_BRANCH"], expected_subject,
+        os.environ["DELIVERY_BRANCH"], expected_subject, event,
+        os.environ["GITHUB_REPOSITORY_ID"], os.environ["GITHUB_REPOSITORY_OWNER_ID"],
     )
     return verify_github_oidc(
         os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"],
         os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"],
         expected_subject,
+        expected_claims=expected_claims,
     )
 
 
-def verify_github_oidc(request_url, request_token, expected_subject, opener=urlopen):
+def verify_github_oidc(request_url, request_token, expected_subject, *, expected_claims, opener=urlopen):
     parts = urlsplit(request_url)
     _require(
         parts.scheme == "https"
@@ -102,6 +127,7 @@ def verify_github_oidc(request_url, request_token, expected_subject, opener=urlo
     token = payload.get("value")
     _require(isinstance(token, str), "GitHub OIDC endpoint returned no token")
     claims = _token_claims(token)
+    _require(isinstance(claims, dict), "GitHub OIDC token contains invalid claims")
     audience = claims.get("aud")
     audiences = audience if isinstance(audience, list) else [audience]
     _require(
@@ -111,6 +137,10 @@ def verify_github_oidc(request_url, request_token, expected_subject, opener=urlo
         and type(claims.get("exp")) in (int, float)
         and claims["exp"] > time.time(),
         "GitHub OIDC token does not match the configured subject, audience and expiry",
+    )
+    _require(
+        all(claims.get(name) == value for name, value in expected_claims.items()),
+        "GitHub OIDC token repository, immutable IDs or ref do not match the runner context",
     )
     return claims["sub"]
 

@@ -7,6 +7,8 @@ import subprocess
 import sys
 from urllib.parse import quote
 
+from workshop.weather_delivery.oidc_identity import delivery_subjects
+
 
 REQUIRED_VARIABLES = (
     "WEATHER_AZURE_CLIENT_ID",
@@ -158,9 +160,19 @@ def inspect_repository(repository, expected_default_branch, delivery_branch=None
             "blocked: configured delivery branch differs from intended branch"
         )
         subject = variables.get("WEATHER_CAPTURE_OIDC_SUBJECT")
+        try:
+            subjects = delivery_subjects(
+                metadata["full_name"], metadata["owner"]["id"], metadata["id"],
+                f"refs/heads/{selected_branch}",
+            )
+            if metadata["full_name"].casefold() != repository.casefold():
+                subjects = ()
+        except (ValueError, KeyError, TypeError):
+            subjects = None
         checks["oidc_subject_setting"] = (
             "unknown: OIDC subject variable missing or unreadable" if not subject else
-            "passed" if subject == f"repo:{repository}:ref:refs/heads/{selected_branch}" else
+            "unknown: repository identity or immutable IDs not returned" if subjects is None else
+            "passed" if subject in subjects else
             "blocked: OIDC subject does not match intended repository and delivery branch"
         )
     else:

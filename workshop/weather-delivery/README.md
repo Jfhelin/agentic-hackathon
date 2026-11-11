@@ -272,7 +272,13 @@ workshop repository and project:
 
 Both jobs use the exact delivery-branch federated subject, normally
 `repo:OWNER/REPOSITORY:ref:refs/heads/DELIVERY_BRANCH`. Confirm the actual subject
-claims and configure an exact match. An old Environment-based subject cannot
+claims and configure an exact match. Repositories using GitHub immutable
+subject claims instead use
+`repo:OWNER@OWNER_ID/REPOSITORY@REPOSITORY_ID:ref:refs/heads/DELIVERY_BRANCH`.
+The jobs compare the repository and IDs from the GitHub event and runner
+context with the token's repository, repository-owner ID, repository ID and
+ref claims before Azure login; missing or mismatched values block the run.
+An old Environment-based subject cannot
 authenticate this branch-based flow; the facilitator must approve and configure
 the branch trust before use. `WEATHER_PRODUCTION_OIDC_SUBJECT` is no longer used.
 The same CI identity is used for both

@@ -51,6 +51,30 @@ def _token_claims(token):
         raise StageBlocked("Azure CLI returned a token with unreadable identity claims") from error
 
 
+def validate_delivery_context(repository, ref, delivery_branch, expected_subject):
+    _require(
+        bool(repository) and bool(delivery_branch)
+        and ref == f"refs/heads/{delivery_branch}",
+        "GitHub ref does not exactly match the configured delivery branch",
+    )
+    _require(
+        expected_subject == f"repo:{repository}:ref:{ref}",
+        "Configured OIDC subject does not exactly match the delivery repository and ref",
+    )
+
+
+def verify_delivery_oidc(expected_subject):
+    validate_delivery_context(
+        os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_REF"],
+        os.environ["DELIVERY_BRANCH"], expected_subject,
+    )
+    return verify_github_oidc(
+        os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"],
+        os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"],
+        expected_subject,
+    )
+
+
 def verify_github_oidc(request_url, request_token, expected_subject, opener=urlopen):
     parts = urlsplit(request_url)
     _require(
@@ -800,9 +824,7 @@ def main(argv=None):
     output_path = getattr(args, "record", None) if args.command == "capture" else getattr(args, "output", None)
     try:
         if args.command == "verify-oidc":
-            subject = verify_github_oidc(
-                os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"],
-                os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"],
+            subject = verify_delivery_oidc(
                 args.expected_subject or os.environ["EXPECTED_OIDC_SUBJECT"],
             )
             print(f"Verified GitHub OIDC subject: {subject}")
@@ -818,11 +840,7 @@ def main(argv=None):
         subscription = os.environ["AZURE_SUBSCRIPTION_ID"]
         client_id = os.environ["AZURE_CLIENT_ID"]
         tenant_id = os.environ["AZURE_TENANT_ID"]
-        verify_github_oidc(
-            os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"],
-            os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"],
-            os.environ["EXPECTED_OIDC_SUBJECT"],
-        )
+        verify_delivery_oidc(os.environ["EXPECTED_OIDC_SUBJECT"])
         token = azure_cli_token(subscription, client_id, tenant_id)
         api = FoundryApi(os.environ["FOUNDRY_PROJECT_ENDPOINT"], token)
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)

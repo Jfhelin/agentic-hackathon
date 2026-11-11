@@ -43,7 +43,7 @@ The Workshop Coach says:
 > approval so you can see those decisions.
 
 Before asking the participant to run anything, confirm the exact repository,
-default branch, Microsoft Foundry Project, existing Dev/Prod names, saved Dev
+delivery branch (normally its default branch), Microsoft Foundry Project, existing Dev/Prod names, saved Dev
 version and participant authorized to start deployment. Reuse earlier verified evidence
 only while its identity, resource and operation scope remain unchanged.
 Check the facilitator setup below, including PR checks and manual deployment
@@ -61,7 +61,7 @@ These are ordinary reviewable files, not a second cloud environment.
 
 ### Guided hands-on steps
 
-1. **Capture Dev.** From the repository's default branch, manually run
+1. **Capture Dev.** From the agreed delivery branch, manually run
    [Capture Weather Dev configuration](../../.github/workflows/weather-delivery-cloud.yml)
    and enter the exact saved Dev version. GitHub Actions reads that version
    from the configured Dev agent, writes the sanitized definition and a small
@@ -79,7 +79,7 @@ These are ordinary reviewable files, not a second cloud environment.
    remains responsible for reviewing and merging the diff.
 4. **Start deployment deliberately.** Merge does not deploy. Manually run
    [Deploy Weather configuration to Prod](../../.github/workflows/weather-delivery-deploy.yml)
-   on the default branch. Enter its full reviewed commit SHA as
+   on the same delivery branch. Enter its full reviewed commit SHA as
    `expected_commit` and check `deploy_approved`. The job refuses an unchecked
    confirmation or a different commit before Azure login. It then creates a
    new version on the existing Prod agent, reads it back and pins the Prod
@@ -107,12 +107,12 @@ differs, ask what is visible rather than inventing a route.
 | Surface | Participant action | Expected evidence |
 |---|---|---|
 | GitHub Copilot app, current repository session with Workshop Coach | Confirm the selected saved Dev version and intended Prod target; choose to start the optional lab | One agreed source and destination; no additional Dev edit required |
-| GitHub website, confirmed repository -> **Actions** -> **Capture Weather Dev configuration** -> **Run workflow** | Select the default branch, enter the exact `agent_version`, then run | A capture run; its **Summary** links to the automatically opened PR, or explains that nothing changed |
+| GitHub website, confirmed repository -> **Actions** -> **Capture Weather Dev configuration** -> **Run workflow** | Select the agreed delivery branch, enter the exact `agent_version`, then run | A capture run; its **Summary** links to the automatically opened PR, or explains that nothing changed |
 | Linked PR -> **Files changed** | Find familiar Weather instructions; inspect model/tool references and manifest source/target | A first captured configuration or a meaningful subsequent diff; no credentials or private conversation content |
 | Same PR -> **Checks** | Wait for `offline-contract-tests`; inspect its run summary | Successful checks on the current PR head; explicitly no model/tool runtime claim |
 | Same PR -> **Conversation** | Review, then use the available merge control when required checks pass | A merged configuration; no deployment starts from merge |
-| GitHub -> repository **Code** -> default branch -> latest commit | With the Coach, confirm this is the reviewed merged configuration and copy the full commit SHA (a 40-character Git identifier) | An exact commit to deploy; if the branch changed, inspect the changes before confirming |
-| GitHub -> **Actions** -> **Deploy Weather configuration to Prod** -> **Run workflow** | Select the default branch, paste `expected_commit`, check `deploy_approved`, then run | The confirmed commit matches the run SHA; no Environment, reviewer gate or extra Azure sign-in prompt |
+| GitHub -> repository **Code** -> delivery branch -> latest commit | With the Coach, confirm this is the reviewed merged configuration and copy the full commit SHA (a 40-character Git identifier) | An exact commit to deploy; if the branch changed, inspect the changes before confirming |
+| GitHub -> **Actions** -> **Deploy Weather configuration to Prod** -> **Run workflow** | Select the delivery branch, paste `expected_commit`, check `deploy_approved`, then run | The confirmed commit matches the run SHA; no Environment, reviewer gate or extra Azure sign-in prompt |
 | Completed deployment run -> **Summary** | Read the exact source version, Git commit, new Prod version, hash and endpoint | A readable receipt of the created/read-back definition and selected version |
 | Microsoft Foundry, starting at https://ai.azure.com/ -> confirmed project | With Coach guidance based on the verified portal route, locate the exact Prod agent/version and selected stable version; compare its instructions with the merged PR | Independent read-back agrees with the receipt; inspect Dev to confirm it was not changed |
 
@@ -157,7 +157,7 @@ evidence.
 
 ### Choose the repository without losing existing work
 
-Use the facilitator-confirmed destination repository and default branch.
+Use the facilitator-confirmed destination repository and delivery branch.
 If the participant has Write access there, create the lab branch/PR in that
 repository. Do not silently publish to another repository. If they lack access,
 explain the limitation and agree on a participant-owned fork or template copy
@@ -168,7 +168,7 @@ When using an existing fork, inspect its branches and unmerged work before
 syncing; never delete, reset or force-push it as setup. If a new copy is needed,
 use GitHub's **Fork** control, or **Use this template** only when available,
 then verify the copy contains the facilitator's reviewed curriculum revision.
-Record its exact owner/name and intended default branch. The participant
+Record its exact owner/name, default branch and intended delivery branch. The participant
 needs permission to run Actions and review/merge; the repository owner or
 facilitator prepares settings and trust. Do not send a read-only participant
 to upstream **Settings** or demand administrator access merely to participate.
@@ -184,19 +184,48 @@ python3 -S -m workshop.weather_delivery.repository_readiness \
   --repository OWNER/REPOSITORY --expected-default-branch FY27
 ```
 
-It reads GitHub metadata only: default branch, administrator access for setup,
-Actions enabled/policy, all three workflow states, and the eight required
-variable names listed below. It does not display variable values, modify
+For a separately agreed rehearsal branch, add `--delivery-branch BRANCH`.
+It reads GitHub metadata only: default and intended delivery branch, administrator access for setup,
+Actions enabled/policy, all three workflow states and default-branch file availability, and the eight required
+variable names listed below. It compares the delivery-branch and OIDC subject settings
+to the intended repository/ref without displaying their values. It does not display variable values, modify
 settings, dispatch workflows or contact Azure. A missing variable is reported
 only after a successful complete listing; hidden, denied and failed requests
 remain **unknown**. Its nonzero exit means setup needs attention, not that the
 participant must be granted administrator access. Involve the owner when needed.
 
-Even a successful preflight means **configured, not authenticated**. It does
-not verify variable values, federated trust, permissions in Microsoft Foundry,
-PR protections, allowed-action policy details, or a working deployment.
+Even a successful preflight means **configured, not authenticated**. Apart from
+the branch and subject comparisons, it does not verify variable values. It
+does not check whether the default-branch files declare `workflow_dispatch`,
+federated trust, permissions in Microsoft Foundry, PR protections,
+allowed-action policy details, or a working deployment.
 Check those separately in facilitator preparation. Missing optional delivery
 configuration must not block reading the curriculum or starting the core lab.
+
+### Separate rehearsal branch
+
+Normally `WEATHER_DELIVERY_BRANCH` is unset and the default branch remains the
+delivery branch. For a rehearsal that must not merge into the default branch,
+the repository owner can explicitly set this optional repository Actions variable
+to the exact existing rehearsal branch name. Both cloud jobs accept only that
+branch, capture checks out the dispatched commit and opens its PR against that
+branch, and deployment requires the exact branch, reviewed full commit and
+explicit confirmation. Configure the OIDC subject and federated credential for
+that same repository and branch, and apply the required PR/check protection to
+that branch. Restrict who can change the variable and trusted branch: anyone
+who can change trusted workflow code may exercise the CI identity's permissions.
+This is a repository-wide switch, not a per-run branch input; changing it
+requires explicit approval and invalidates the previously configured trust.
+
+GitHub requires a `workflow_dispatch` workflow file to exist on the repository's
+default branch for manual dispatch. An active workflow listing or a pushed
+rehearsal branch alone does not establish that prerequisite. Confirm all three
+workflow files exist there and support dispatch, and that Actions and dispatch
+permissions are enabled. If they do not, an owner must separately approve and
+prepare registration on the default branch, or agree on a different repository
+whose default branch already contains the workflows. Do not silently change the
+default branch, merge into it, or modify settings to bypass the restriction.
+See [GitHub's workflow_dispatch documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
 
 ### Configuration and rehearsal checklist
 
@@ -211,7 +240,7 @@ workshop repository and project:
   their exact values.
 - Configure `WEATHER_AZURE_CLIENT_ID`, `WEATHER_AZURE_TENANT_ID`, and
   `WEATHER_AZURE_SUBSCRIPTION_ID` as repository Actions variables. Configure
-  `WEATHER_CAPTURE_OIDC_SUBJECT` for the default-branch subject used by both
+  `WEATHER_CAPTURE_OIDC_SUBJECT` for the delivery-branch subject used by both
   capture and deployment. Add the matching federated credential in Microsoft Entra ID; do not use a
   client secret.
 - Give the CI identity only the Foundry permissions needed to read the
@@ -223,7 +252,7 @@ workshop repository and project:
   deployment. Rehearse its unchecked-confirmation and wrong-commit rejection
   before Azure login. GitHub Environments and their approval features are not
   required. The same person may review/merge and start deployment in this lab.
-- Protect the default branch with a rule/ruleset requiring a pull request and
+- Protect the delivery branch with a rule/ruleset requiring a pull request and
   the `offline-contract-tests` check from GitHub Actions before merge.
   Confirm the dispatched check on the actual PR head satisfies the rule and
   a pending/failed check prevents merge for the participant (no bypass).
@@ -241,8 +270,8 @@ workshop repository and project:
   manual deployment confirmation, Prod version creation/read-back, and endpoint pinning
   in an approved test project before teaching it live.
 
-Both jobs use the default-branch federated subject, normally
-`repo:OWNER/REPOSITORY:ref:refs/heads/DEFAULT_BRANCH`. Confirm the actual subject
+Both jobs use the exact delivery-branch federated subject, normally
+`repo:OWNER/REPOSITORY:ref:refs/heads/DELIVERY_BRANCH`. Confirm the actual subject
 claims and configure an exact match. An old Environment-based subject cannot
 authenticate this branch-based flow; the facilitator must approve and configure
 the branch trust before use. `WEATHER_PRODUCTION_OIDC_SUBJECT` is no longer used.
@@ -272,7 +301,7 @@ authenticate a job running later on a GitHub-hosted runner.
 Prepare the automation identity/trust and scoped project role assignment once
 per participating repository/project before the promotion exercise, preferably
 before the cohort. Explain the exact application identity, project, trusted
-default-branch GitHub subject, intended access and possible costs. Obtain separate explicit
+delivery-branch GitHub subject, intended access and possible costs. Obtain separate explicit
 approval before creating an identity, adding trust/roles, editing repository
 settings or creating Prod. If the participant lacks the required administrator
 rights, involve the facilitator; repeated sign-ins do not fix missing permission.

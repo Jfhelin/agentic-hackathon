@@ -5,6 +5,7 @@ import json
 import re
 import subprocess
 import sys
+from urllib.parse import quote
 
 
 REQUIRED_VARIABLES = (
@@ -64,7 +65,7 @@ def _listed_items(pages, key):
     return [item for page in pages for item in page[key]]
 
 
-def inspect_repository(repository, expected_default_branch):
+def inspect_repository(repository, expected_default_branch, delivery_branch=None):
     if (
         re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", repository) is None
         or repository.rsplit("/", 1)[-1] in {".", ".."}
@@ -72,10 +73,16 @@ def inspect_repository(repository, expected_default_branch):
         raise ValueError("Use an explicit OWNER/REPOSITORY name")
     if not expected_default_branch.strip():
         raise ValueError("Confirm the intended default branch")
+    if delivery_branch is not None and (
+        not delivery_branch.strip() or delivery_branch != delivery_branch.strip()
+    ):
+        raise ValueError("Confirm the exact delivery branch")
+    selected_branch = delivery_branch or expected_default_branch
     prefix = f"repos/{repository}"
     report = {
         "repository": repository,
         "expected_default_branch": expected_default_branch,
+        "expected_delivery_branch": selected_branch,
         "scope": "GitHub metadata only; no Azure access, runtime test or deployment",
         "checks": {},
         "cloud_variables": {"status": "unknown: repository access not verified"},
@@ -93,6 +100,12 @@ def inspect_repository(repository, expected_default_branch):
         "passed" if actual_branch == expected_default_branch else
         "blocked: default branch differs from intended workshop branch"
     )
+    if delivery_branch is not None:
+        state, branch = _read_api(f"{prefix}/branches/{quote(selected_branch, safe='')}")
+        checks["delivery_branch_exists"] = (
+            "passed" if state == "read" and branch.get("name") == selected_branch else
+            "unknown: branch name not returned or differs" if state == "read" else state
+        )
     admin = metadata.get("permissions", {}).get("admin")
     checks["administrator_access"] = (
         "passed" if admin is True else
@@ -121,14 +134,35 @@ def inspect_repository(repository, expected_default_branch):
             )
     else:
         checks["workflow_availability"] = state
+    for path in REQUIRED_WORKFLOWS:
+        state, file_metadata = _read_api(
+            f"{prefix}/contents/{path}?ref={quote(expected_default_branch, safe='')}"
+        )
+        checks[f"{path} on default branch"] = (
+            "passed" if state == "read" and file_metadata.get("type") == "file" else
+            "unknown: workflow file metadata not returned" if state == "read" else state
+        )
     state, pages = _read_api(f"{prefix}/actions/variables?per_page=100", paginate=True)
     if state == "read":
-        names = {item["name"] for item in _listed_items(pages, "variables")}
+        variables = {item["name"]: item.get("value") for item in _listed_items(pages, "variables")}
+        names = set(variables)
         missing = sorted(set(REQUIRED_VARIABLES) - names)
         report["cloud_variables"] = {
             "status": "missing" if missing else "configured-not-authenticated",
             "missing_names": missing,
         }
+        configured_branch = variables.get("WEATHER_DELIVERY_BRANCH") or actual_branch
+        checks["delivery_branch_setting"] = (
+            "unknown: default branch not returned" if not configured_branch else
+            "passed" if configured_branch == selected_branch else
+            "blocked: configured delivery branch differs from intended branch"
+        )
+        subject = variables.get("WEATHER_CAPTURE_OIDC_SUBJECT")
+        checks["oidc_subject_setting"] = (
+            "unknown: OIDC subject variable missing or unreadable" if not subject else
+            "passed" if subject == f"repo:{repository}:ref:refs/heads/{selected_branch}" else
+            "blocked: OIDC subject does not match intended repository and delivery branch"
+        )
     else:
         report["cloud_variables"] = {"status": state}
     return report
@@ -138,9 +172,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--expected-default-branch", required=True)
+    parser.add_argument("--delivery-branch", help="Exact intended branch; defaults to the expected default branch")
     args = parser.parse_args(argv)
     try:
-        report = inspect_repository(args.repository, args.expected_default_branch)
+        report = inspect_repository(args.repository, args.expected_default_branch, args.delivery_branch)
     except (ValueError, KeyError, TypeError, AttributeError) as error:
         print(f"BLOCKED: repository metadata could not be interpreted: {error}", file=sys.stderr)
         return 1

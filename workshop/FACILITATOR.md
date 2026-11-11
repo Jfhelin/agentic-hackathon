@@ -186,7 +186,7 @@ Before the cohort:
   Follow `weather-delivery/README.md` for the lab-only authentication preparation
   and participant navigation. Obtain explicit approval before configuring
   persistent trust, roles or protections. Rehearse the required PR check with
-  no participant bypass and verify default-branch dispatch permission and
+  no participant bypass and verify delivery-branch dispatch permission and
   rejection of unchecked confirmation/wrong commit before login. No GitHub
   Environment is required; document that this is not an independent reviewer gate.
   Do not impose a path-filtered required check

@@ -17,8 +17,12 @@ def responses():
             {"workflows": [{"path": path, "state": "active"}]}
             for path in readiness.REQUIRED_WORKFLOWS
         ]),
+        *[("read", {"type": "file"}) for _ in readiness.REQUIRED_WORKFLOWS],
         ("read", [{"variables": [
-            {"name": name, "value": "DO-NOT-PRINT"}
+            {"name": name, "value": (
+                "repo:owner/lab:ref:refs/heads/FY27"
+                if name == "WEATHER_CAPTURE_OIDC_SUBJECT" else "DO-NOT-PRINT"
+            )}
             for name in readiness.REQUIRED_VARIABLES
         ]}]),
     ]
@@ -66,6 +70,41 @@ class ReadinessTests(unittest.TestCase):
         report = readiness.inspect_repository("owner/lab", "FY27")
         self.assertTrue(report["cloud_variables"]["status"].startswith("unknown:"))
         self.assertEqual(api.call_count, 1)
+
+    @patch.object(readiness, "_read_api")
+    def test_explicit_delivery_branch_checks_ref_and_setting_without_exposing_values(self, api):
+        data = responses()
+        data.insert(1, ("read", {"name": "rehearsal/branch"}))
+        data[-1][1][0]["variables"].append({
+            "name": "WEATHER_DELIVERY_BRANCH", "value": "rehearsal/branch"
+        })
+        for item in data[-1][1][0]["variables"]:
+            if item["name"] == "WEATHER_CAPTURE_OIDC_SUBJECT":
+                item["value"] = "repo:owner/lab:ref:refs/heads/rehearsal/branch"
+        api.side_effect = data
+        report = readiness.inspect_repository("owner/lab", "FY27", "rehearsal/branch")
+        self.assertTrue(all(value == "passed" for value in report["checks"].values()))
+        self.assertIn("rehearsal%2Fbranch", api.call_args_list[1].args[0])
+        self.assertNotIn("DO-NOT-PRINT", json.dumps(report))
+
+    @patch.object(readiness, "_read_api")
+    def test_wrong_delivery_setting_or_subject_is_blocked(self, api):
+        data = responses()
+        data.insert(1, ("read", {"name": "rehearsal"}))
+        api.side_effect = data
+        report = readiness.inspect_repository("owner/lab", "FY27", "rehearsal")
+        self.assertTrue(report["checks"]["delivery_branch_setting"].startswith("blocked:"))
+        self.assertTrue(report["checks"]["oidc_subject_setting"].startswith("blocked:"))
+
+    @patch.object(readiness, "_read_api")
+    def test_registered_workflow_is_not_proof_of_default_branch_file(self, api):
+        data = responses()
+        data[4] = ("unknown: unavailable or hidden; not evidence of absence", None)
+        api.side_effect = data
+        report = readiness.inspect_repository("owner/lab", "FY27")
+        key = f"{readiness.REQUIRED_WORKFLOWS[1]} on default branch"
+        self.assertTrue(report["checks"][key].startswith("unknown:"))
+        self.assertEqual(report["checks"][readiness.REQUIRED_WORKFLOWS[1]], "passed")
 
     @patch.object(readiness.subprocess, "run")
     def test_cli_failures_are_unknown_without_disclosing_stderr(self, run):

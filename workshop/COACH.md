@@ -1017,7 +1017,8 @@ from the participant/runtime identity. A deployment confirmation never
 stands in for human approval of the actual MCP tool and arguments.
 
 The capture workflow opens the PR and dispatches the offline check; the deploy
-workflow is manually dispatched on the default branch after merge, with the
+workflow is manually dispatched on the agreed delivery branch (normally the
+default branch) after merge, with the
 full reviewed commit SHA and an explicit deployment confirmation. Merge alone
 does not deploy; no GitHub Environment is used. CI checks the captured JSON and hash; they
 are not an AI review or a live quality test. The Prod stage creates a version
@@ -1038,7 +1039,7 @@ Supply real run/PR links from observed outputs. The first capture adds files;
 later captures show changes. Read workflow summaries together, including
 "nothing new" or failure outcomes, without calling those a new promotion.
 Do not run a learner's merge or approval for them merely to save time.
-Before publishing, confirm the agreed writable destination/default branch and
+Before publishing, confirm the agreed writable destination and delivery branch and
 preserve fork-only work; do not silently substitute a fork or send a read-only
 participant into upstream Settings. Use the lab's read-only GitHub preflight
 to distinguish missing settings from denied/unknown access. Setup may need the

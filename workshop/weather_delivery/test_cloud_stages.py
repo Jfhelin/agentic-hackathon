@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
 from workshop.weather_delivery.cloud_stages import (
@@ -20,6 +20,8 @@ from workshop.weather_delivery.cloud_stages import (
     prepare_release_version,
     start_tool_call,
     test_stable_endpoint,
+    validate_delivery_context,
+    verify_delivery_oidc,
     verify_github_oidc,
     write_capture_manifest,
 )
@@ -118,6 +120,32 @@ class FakeFoundryApi:
 
 
 class OidcTests(unittest.TestCase):
+    def test_delivery_context_requires_exact_ref_repository_and_subject(self):
+        for branch in ("FY27", "rehearsal/test"):
+            ref = f"refs/heads/{branch}"
+            subject = f"repo:example/workshop:ref:{ref}"
+            validate_delivery_context("example/workshop", ref, branch, subject)
+            for repo, actual_ref, selected, expected in (
+                ("example/workshop", ref.upper(), branch, subject),
+                ("example/workshop", ref, branch + "-other", subject),
+                ("example/other", ref, branch, subject),
+                ("example/workshop", ref, branch, SUBJECT + "-other"),
+            ):
+                with self.assertRaises(StageBlocked):
+                    validate_delivery_context(repo, actual_ref, selected, expected)
+
+    @patch("workshop.weather_delivery.cloud_stages.verify_github_oidc")
+    def test_delivery_oidc_checks_context_before_request(self, verify):
+        context = {
+            "GITHUB_REPOSITORY": "example/workshop",
+            "GITHUB_REF": "refs/heads/FY27",
+            "DELIVERY_BRANCH": "rehearsal",
+        }
+        with patch.dict("os.environ", context, clear=True):
+            with self.assertRaises(StageBlocked):
+                verify_delivery_oidc(SUBJECT)
+        verify.assert_not_called()
+
     def test_exact_github_subject_is_verified(self):
         token = "header." + __import__("base64").urlsafe_b64encode(json.dumps({
             "iss": "https://token.actions.githubusercontent.com",

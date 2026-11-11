@@ -1,0 +1,8 @@
+{
+  "definition_sha256": "1a7732575de56494e921324c04d023ec564cc5fb00cf497f33888e70870bcd7c",
+  "production_agent_name": "weather-research-agent-rehearsal-prod",
+  "production_stable_endpoint": "https://foundrytest-dev-7a5b55a7.services.ai.azure.com/api/projects/agentic-workshop/agents/weather-research-agent-rehearsal-prod/endpoint/protocols/openai/responses",
+  "schema_version": 1,
+  "source_agent_name": "weather-research-agent-20261102-direct",
+  "source_agent_version": "2"
+}
